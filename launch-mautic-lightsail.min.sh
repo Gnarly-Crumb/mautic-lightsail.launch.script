@@ -73,10 +73,6 @@ MONIT
 chmod 600 /etc/monit/monitrc
 systemctl enable --now monit
 apt-get clean
-if ! command -v node >/dev/null 2>&1 || [ "$(node -p 'process.versions.node.split(\".\")[0]')" -lt 20 ]; then
-    curl -fsSL https://deb.nodesource.com/setup_20.x | bash -
-    apt-get install -y nodejs
-fi
 add-apt-repository ppa:ondrej/php -y && apt-get update
 apt-get install -y php8.3-fpm php8.3-cli php8.3-mysql php8.3-gd php8.3-mbstring \
     php8.3-xml php8.3-curl php8.3-zip php8.3-intl php8.3-imap php8.3-bcmath \
@@ -210,13 +206,10 @@ if ! command -v composer >/dev/null 2>&1; then
     curl -sS https://getcomposer.org/installer | php -- --install-dir=/usr/local/bin --filename=composer
 fi
 cd "$BUILD_DIR"
-echo "Using Node $(node -v) and npm $(npm -v) for Mautic build"
-echo "Running Composer bootstrap install"
+echo "Running Composer install without package scripts"
 composer install --no-dev --no-scripts --no-plugins --no-autoloader --no-interaction
 echo "Generating optimized Composer autoloader"
 composer dump-autoload --optimize
-echo "Running full Composer install"
-composer install --no-dev --optimize-autoloader --no-interaction
 cd -
 mkdir -p "$MAUTIC_DIR"
 rsync -a "$BUILD_DIR/" "$MAUTIC_DIR/"

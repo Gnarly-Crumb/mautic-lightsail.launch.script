@@ -58,7 +58,6 @@ fi
 # === 2. PRIMARY PACKAGE INSTALL (NOBLE NATIVE) ===
 # base packages plus utilities required by Mautic and provisioning.
 apt-get update && apt-get -y upgrade
-# base OS packages only; install Node separately so Mautic gets a modern LTS.
 apt-get install -y software-properties-common curl wget unzip git htop fail2ban ufw \
     chrony gnupg lsb-release ca-certificates nginx mysql-server redis-server rsync \
     postfix unattended-upgrades monit
@@ -112,13 +111,6 @@ systemctl enable --now monit
 
 # purge apt cache to minimize disk usage
 apt-get clean
-
-# Install Node 20 LTS from NodeSource so Mautic's npm/webpack build does not
-# inherit Ubuntu's older distro packages.
-if ! command -v node >/dev/null 2>&1 || [ "$(node -p 'process.versions.node.split(\".\")[0]')" -lt 20 ]; then
-    curl -fsSL https://deb.nodesource.com/setup_20.x | bash -
-    apt-get install -y nodejs
-fi
 
 # === 3. PHP 8.3 SETUP & TUNING ===
 add-apt-repository ppa:ondrej/php -y && apt-get update
@@ -296,15 +288,13 @@ systemctl restart nginx
 if ! command -v composer >/dev/null 2>&1; then
     curl -sS https://getcomposer.org/installer | php -- --install-dir=/usr/local/bin --filename=composer
 fi
-# run composer inside the build tree using host PHP
+# run a production-safe composer install inside the build tree using host PHP.
+# this intentionally skips package scripts so the host does not run npm/webpack.
 cd "$BUILD_DIR"
-echo "Using Node $(node -v) and npm $(npm -v) for Mautic build"
-echo "Running Composer bootstrap install"
+echo "Running Composer install without package scripts"
 composer install --no-dev --no-scripts --no-plugins --no-autoloader --no-interaction
 echo "Generating optimized Composer autoloader"
 composer dump-autoload --optimize
-echo "Running full Composer install"
-composer install --no-dev --optimize-autoloader --no-interaction
 cd -
 
 # === 8. DEPLOY & CLI INSTALL ===
