@@ -1,10 +1,12 @@
+#!/bin/sh
+SCRIPT_SOURCE_PATH=$(readlink -f "$0" 2>/dev/null || printf '%s\n' "$0")
+export SCRIPT_SOURCE_PATH
 exec /bin/bash <<'PROVISIONER'
 set -euo pipefail
 umask 002
 exec 1>>/var/log/mautic-provision.log 2>&1
 echo "=== PROVISIONING START: $(date) ==="
 if [ -f /root/.mautic_env ]; then
-    # shellcheck disable=SC1090
     . /root/.mautic_env
 fi
 DOMAIN="${DOMAIN:-ems.mympress.com}"
@@ -30,48 +32,59 @@ fi
 apt-get update && apt-get -y upgrade
 apt-get install -y software-properties-common curl wget unzip git htop fail2ban ufw \
     chrony gnupg lsb-release ca-certificates nginx mysql-server redis-server rsync \
-    postfix unattended-upgrades monit nodejs npm
+    postfix unattended-upgrades monit
 export COMPOSER_ALLOW_SUPERUSER=1
 postconf -e 'inet_interfaces = loopback-only'
 postconf -e 'mydestination = localhost'
 postconf -e 'relayhost ='
 service postfix restart
 dpkg-reconfigure -f noninteractive unattended-upgrades
-cat <<'MONIT' > /etc/monit/monitrc
+cat <<MONIT > /etc/monit/monitrc
 set daemon 60
 set logfile syslog
 set mailserver localhost
 set alert ${ADMIN_EMAIL} but not on { instance, action }
+
+# check critical services
 check process nginx with pidfile /run/nginx.pid
     start program = "/bin/systemctl start nginx"
     stop program  = "/bin/systemctl stop nginx"
     if failed port 80 protocol http then alert
+
 check process php-fpm with pidfile /run/php/php8.3-fpm.pid
     start program = "/bin/systemctl start php8.3-fpm"
     stop program  = "/bin/systemctl stop php8.3-fpm"
-    if failed port 9000 protocol http then alert
+    if failed unixsocket /run/php/php8.3-fpm.sock then alert
+
 check process mysql with pidfile /var/run/mysqld/mysqld.pid
     start program = "/bin/systemctl start mysql"
     stop program  = "/bin/systemctl stop mysql"
     if failed port 3306 then alert
+
 check process redis with pidfile /var/run/redis/redis-server.pid
     start program = "/bin/systemctl start redis-server"
     stop program  = "/bin/systemctl stop redis-server"
     if failed port 6379 then alert
+
+# disk space warning
 check filesystem rootfs with path /
     if space usage > 80% then alert
 MONIT
 chmod 600 /etc/monit/monitrc
 systemctl enable --now monit
 apt-get clean
+if ! command -v node >/dev/null 2>&1 || [ "$(node -p 'process.versions.node.split(\".\")[0]')" -lt 20 ]; then
+    curl -fsSL https://deb.nodesource.com/setup_20.x | bash -
+    apt-get install -y nodejs
+fi
 add-apt-repository ppa:ondrej/php -y && apt-get update
 apt-get install -y php8.3-fpm php8.3-cli php8.3-mysql php8.3-gd php8.3-mbstring \
     php8.3-xml php8.3-curl php8.3-zip php8.3-intl php8.3-imap php8.3-bcmath \
     php8.3-redis php8.3-opcache
 PHP_INI="/etc/php/8.3/fpm/php.ini"
 sed -i "s/^memory_limit = .*/memory_limit = 512M/" "$PHP_INI"
-sed -i "s/^session.save_handler.*/session.save_handler = redis/" "$PHP_INI"
-sed -i "s|^session.save_path.*|session.save_path = \"tcp://127.0.0.1:6379?database=0\"|" "$PHP_INI"
+sed -i "s/^;\\?session.save_handler.*/session.save_handler = redis/" "$PHP_INI"
+sed -i "s|^;\\?session.save_path.*|session.save_path = \"tcp://127.0.0.1:6379?database=0\"|" "$PHP_INI"
 grep -q '^opcache.memory_consumption' "$PHP_INI" || cat >> "$PHP_INI" <<'EOP'
 opcache.memory_consumption=256
 opcache.max_accelerated_files=10000
@@ -96,7 +109,6 @@ pm.max_spare_servers = $((CHILDREN/2))
 EOF
 systemctl restart php8.3-fpm
 if [ -f /root/.mautic_env ]; then
-    # shellcheck disable=SC1090
     . /root/.mautic_env
 fi
 DB_ROOT_PASS="${DB_ROOT_PASS:-$(openssl rand -base64 24)}"
@@ -104,7 +116,7 @@ DB_USER="${DB_USER:-ems_mautic_user}"
 DB_PASS="${DB_PASS:-$(openssl rand -base64 24)}"
 DB_NAME="${DB_NAME:-ems_mautic}"
 ADMIN_PASS="${ADMIN_PASS:-$(openssl rand -base64 18)}"
-cat <<'ENV' > /root/.mautic_env
+cat <<ENV > /root/.mautic_env
 DB_ROOT_PASS="${DB_ROOT_PASS}"
 DB_USER="${DB_USER}"
 DB_PASS="${DB_PASS}"
@@ -161,9 +173,11 @@ server {
     server_name ${DOMAIN};
     root ${WEBROOT_PATH};
     index index.php;
+
     # fastcgi buffers tuned to avoid 502/504 on large exports
     fastcgi_buffers 16 16k;
     fastcgi_buffer_size 32k;
+
     # static file handling
     location / { try_files \$uri \$uri/ /index.php\$is_args\$args; }
     location ~ ^/index\.php(/|$) {
@@ -172,13 +186,17 @@ server {
         fastcgi_param SCRIPT_FILENAME \$realpath_root\$fastcgi_script_name;
         fastcgi_read_timeout 300;
     }
+
     # internal protection of sensitive paths
     location ~* (app/config|var/logs|bin/console) { deny all; }
+
     # allow larger uploads (e.g. import files)
     client_max_body_size 100M;
+
     # security headers
     add_header X-Frame-Options SAMEORIGIN;
     add_header X-Content-Type-Options nosniff;
+
     # gzip for assets
     gzip on;
     gzip_types text/css application/javascript application/json image/svg+xml;
@@ -188,21 +206,16 @@ EOF
 ln -sf /etc/nginx/sites-available/mautic.conf /etc/nginx/sites-enabled/
 rm -f /etc/nginx/sites-enabled/default
 systemctl restart nginx
-mkdir -p "$BUILD_DIR/app/config"
-cat <<EOF > "$BUILD_DIR/app/config/local.php"
-<?php
-return [
-    'db_driver' => 'pdo_mysql', 'db_host' => '127.0.0.1', 'db_name' => '${DB_NAME}',
-    'db_user' => '${DB_USER}', 'db_password' => '${DB_PASS}', 'db_server_version' => '8.0.0',
-    'cache_path' => 'redis://127.0.0.1:6379/1',
-];
-EOF
 if ! command -v composer >/dev/null 2>&1; then
     curl -sS https://getcomposer.org/installer | php -- --install-dir=/usr/local/bin --filename=composer
 fi
 cd "$BUILD_DIR"
-composer install --no-dev --no-scripts --no-plugins --no-autoloader --no-interaction || true
+echo "Using Node $(node -v) and npm $(npm -v) for Mautic build"
+echo "Running Composer bootstrap install"
+composer install --no-dev --no-scripts --no-plugins --no-autoloader --no-interaction
+echo "Generating optimized Composer autoloader"
 composer dump-autoload --optimize
+echo "Running full Composer install"
 composer install --no-dev --optimize-autoloader --no-interaction
 cd -
 mkdir -p "$MAUTIC_DIR"
@@ -210,20 +223,26 @@ rsync -a "$BUILD_DIR/" "$MAUTIC_DIR/"
 id -u ${MAUTIC_USER} >/dev/null 2>&1 || useradd -m -s /bin/bash ${MAUTIC_USER}
 chown -R ${MAUTIC_USER}:${MAUTIC_GROUP} ${MAUTIC_DIR}
 rm -rf "$BUILD_DIR"
-if host "${DOMAIN}" >/dev/null 2>&1; then
+if [ -d "/etc/letsencrypt/live/${DOMAIN}" ]; then
     INSTALL_URL="https://${DOMAIN}"
 else
-    echo "127.0.0.1 ${DOMAIN}" >> /etc/hosts || true
+    if ! grep -Fq "127.0.0.1 ${DOMAIN}" /etc/hosts; then
+        echo "127.0.0.1 ${DOMAIN}" >> /etc/hosts
+    fi
     INSTALL_URL="http://${DOMAIN}"
 fi
-sudo -u ${MAUTIC_USER} bash -c "cd ${MAUTIC_DIR} && php bin/console mautic:install ${INSTALL_URL} \
-    --db_user=${DB_USER} --db_password='${DB_PASS}' \
-    --db_name=${DB_NAME} --admin_email='${ADMIN_EMAIL}' \
-    --admin_password='${ADMIN_PASS}' \
-    --mailer_from_name='${MAILER_FROM_NAME}' --mailer_from_email='${ADMIN_EMAIL}' \
-    --mailer_transport=smtp --mailer_host=localhost --mailer_port=25 \
-    --timezone='${TIMEZONE}' --locale='${LOCALE}' \
-    --no-interaction"
+if [ -f "${MAUTIC_DIR}/config/local.php" ] || [ -f "${MAUTIC_DIR}/app/config/local.php" ]; then
+    echo "Mautic appears to be already installed; skipping mautic:install"
+else
+    sudo -u ${MAUTIC_USER} bash -c "cd ${MAUTIC_DIR} && php bin/console mautic:install ${INSTALL_URL} \
+        --db_user=${DB_USER} --db_password='${DB_PASS}' \
+        --db_name=${DB_NAME} --admin_email='${ADMIN_EMAIL}' \
+        --admin_password='${ADMIN_PASS}' \
+        --mailer_from_name='${MAILER_FROM_NAME}' --mailer_from_email='${ADMIN_EMAIL}' \
+        --mailer_transport=smtp --mailer_host=localhost --mailer_port=25 \
+        --timezone='${TIMEZONE}' --locale='${LOCALE}' \
+        --no-interaction"
+fi
 ufw allow OpenSSH && ufw allow 'Nginx Full' && ufw --force enable
 sed -i 's/^#PermitRootLogin.*/PermitRootLogin no/' /etc/ssh/sshd_config
 sed -i 's/^#PasswordAuthentication.*/PasswordAuthentication no/' /etc/ssh/sshd_config
@@ -231,6 +250,7 @@ systemctl restart sshd
 cat <<'EOF' > /etc/fail2ban/jail.d/mautic.local
 [sshd]
 enabled = true
+
 [nginx-http-auth]
 enabled = true
 EOF
@@ -240,12 +260,13 @@ if [ ! -d "/etc/letsencrypt/live/${DOMAIN}" ]; then
     certbot --nginx -d "$DOMAIN" -m "$ADMIN_EMAIL" --agree-tos --non-interactive --redirect || true
 fi
 cat <<EOF > /etc/cron.d/mautic
+# Mautic 7 production crons (every 5 minutes)
 */5 * * * * ${MAUTIC_USER} php ${MAUTIC_DIR}/bin/console mautic:segments:update > /dev/null 2>&1
 */5 * * * * ${MAUTIC_USER} php ${MAUTIC_DIR}/bin/console mautic:campaigns:update > /dev/null 2>&1
 */5 * * * * ${MAUTIC_USER} php ${MAUTIC_DIR}/bin/console mautic:campaigns:trigger > /dev/null 2>&1
 */5 * * * * ${MAUTIC_USER} php ${MAUTIC_DIR}/bin/console mautic:emails:send > /dev/null 2>&1
 EOF
-cat <<'LOGROT' > /etc/logrotate.d/mautic
+cat <<LOGROT > /etc/logrotate.d/mautic
 ${MAUTIC_DIR}/var/logs/*.log {
     daily
     rotate 7
@@ -264,15 +285,17 @@ DB_ROOT_PASS: ${DB_ROOT_PASS}
 CRED
 chmod 600 /root/mautic-credentials.txt
 SCRIPT_PATH="/usr/local/bin/launch-mautic-lightsail.sh"
-if [ ! -e "$SCRIPT_PATH" ]; then
-    cp "$0" "$SCRIPT_PATH" && chmod +x "$SCRIPT_PATH"
+if [ ! -e "$SCRIPT_PATH" ] && [ -f "${SCRIPT_SOURCE_PATH}" ]; then
+    cp "${SCRIPT_SOURCE_PATH}" "$SCRIPT_PATH" && chmod +x "$SCRIPT_PATH"
 fi
-cat <<'CRON' > /etc/cron.weekly/mautic-provisioner
-$SCRIPT_PATH || true
+cat <<CRON > /etc/cron.weekly/mautic-provisioner
+#!/bin/sh
+# re-run the provision script to apply any new configuration or updates
+MAUTIC_PROVISION_FROM_CRON=1 ${SCRIPT_PATH} || true
 CRON
 chmod +x /etc/cron.weekly/mautic-provisioner
 echo "=== PROVISIONING COMPLETE ==="
-if [ -z "$CI" ] && [ "$0" = "/usr/local/bin/launch-mautic-lightsail.sh" ]; then
+if [ -z "${CI:-}" ] && [ -z "${MAUTIC_PROVISION_FROM_CRON:-}" ]; then
     reboot
 fi
 PROVISIONER

@@ -1,5 +1,7 @@
 #!/bin/sh
 # This header is for Dash. It immediately hands off the rest of the file to Bash.
+SCRIPT_SOURCE_PATH=$(readlink -f "$0" 2>/dev/null || printf '%s\n' "$0")
+export SCRIPT_SOURCE_PATH
 exec /bin/bash <<'PROVISIONER'
 
 # === 0. GLOBAL SAFETY & LOGGING ===
@@ -56,10 +58,10 @@ fi
 # === 2. PRIMARY PACKAGE INSTALL (NOBLE NATIVE) ===
 # base packages plus utilities required by Mautic and provisioning.
 apt-get update && apt-get -y upgrade
-# ensure we have node and npm so Composer scripts (like npm ci) can run
+# base OS packages only; install Node separately so Mautic gets a modern LTS.
 apt-get install -y software-properties-common curl wget unzip git htop fail2ban ufw \
     chrony gnupg lsb-release ca-certificates nginx mysql-server redis-server rsync \
-    postfix unattended-upgrades monit nodejs npm
+    postfix unattended-upgrades monit
 
 # allow Composer to work as root (script already sets HOME)
 export COMPOSER_ALLOW_SUPERUSER=1
@@ -74,7 +76,7 @@ service postfix restart
 dpkg-reconfigure -f noninteractive unattended-upgrades
 
 # configure basic monitoring/alerting using monit
-cat <<'MONIT' > /etc/monit/monitrc
+cat <<MONIT > /etc/monit/monitrc
 set daemon 60
 set logfile syslog
 set mailserver localhost
@@ -89,7 +91,7 @@ check process nginx with pidfile /run/nginx.pid
 check process php-fpm with pidfile /run/php/php8.3-fpm.pid
     start program = "/bin/systemctl start php8.3-fpm"
     stop program  = "/bin/systemctl stop php8.3-fpm"
-    if failed port 9000 protocol http then alert
+    if failed unixsocket /run/php/php8.3-fpm.sock then alert
 
 check process mysql with pidfile /var/run/mysqld/mysqld.pid
     start program = "/bin/systemctl start mysql"
@@ -111,6 +113,13 @@ systemctl enable --now monit
 # purge apt cache to minimize disk usage
 apt-get clean
 
+# Install Node 20 LTS from NodeSource so Mautic's npm/webpack build does not
+# inherit Ubuntu's older distro packages.
+if ! command -v node >/dev/null 2>&1 || [ "$(node -p 'process.versions.node.split(\".\")[0]')" -lt 20 ]; then
+    curl -fsSL https://deb.nodesource.com/setup_20.x | bash -
+    apt-get install -y nodejs
+fi
+
 # === 3. PHP 8.3 SETUP & TUNING ===
 add-apt-repository ppa:ondrej/php -y && apt-get update
 apt-get install -y php8.3-fpm php8.3-cli php8.3-mysql php8.3-gd php8.3-mbstring \
@@ -120,8 +129,8 @@ apt-get install -y php8.3-fpm php8.3-cli php8.3-mysql php8.3-gd php8.3-mbstring 
 PHP_INI="/etc/php/8.3/fpm/php.ini"
 # basic tuning
 sed -i "s/^memory_limit = .*/memory_limit = 512M/" "$PHP_INI"
-sed -i "s/^session.save_handler.*/session.save_handler = redis/" "$PHP_INI"
-sed -i "s|^session.save_path.*|session.save_path = \"tcp://127.0.0.1:6379?database=0\"|" "$PHP_INI"
+sed -i "s/^;\\?session.save_handler.*/session.save_handler = redis/" "$PHP_INI"
+sed -i "s|^;\\?session.save_path.*|session.save_path = \"tcp://127.0.0.1:6379?database=0\"|" "$PHP_INI"
 # opcache is critical for performance
 grep -q '^opcache.memory_consumption' "$PHP_INI" || cat >> "$PHP_INI" <<'EOP'
 opcache.memory_consumption=256
@@ -165,7 +174,7 @@ DB_NAME="${DB_NAME:-ems_mautic}"
 ADMIN_PASS="${ADMIN_PASS:-$(openssl rand -base64 18)}"
 
 # write back the persistent file so future invocations keep same values
-cat <<'ENV' > /root/.mautic_env
+cat <<ENV > /root/.mautic_env
 DB_ROOT_PASS="${DB_ROOT_PASS}"
 DB_USER="${DB_USER}"
 DB_PASS="${DB_PASS}"
@@ -282,15 +291,6 @@ systemctl restart nginx
 # === 7. HOST BUILD (COMPOSER) ===
 # composer is used to assemble dependencies using the host PHP,
 # which already has gd/imap enabled via apt packages.
-mkdir -p "$BUILD_DIR/app/config"
-cat <<EOF > "$BUILD_DIR/app/config/local.php"
-<?php
-return [
-    'db_driver' => 'pdo_mysql', 'db_host' => '127.0.0.1', 'db_name' => '${DB_NAME}',
-    'db_user' => '${DB_USER}', 'db_password' => '${DB_PASS}', 'db_server_version' => '8.0.0',
-    'cache_path' => 'redis://127.0.0.1:6379/1',
-];
-EOF
 
 # install composer locally if not already present
 if ! command -v composer >/dev/null 2>&1; then
@@ -298,8 +298,12 @@ if ! command -v composer >/dev/null 2>&1; then
 fi
 # run composer inside the build tree using host PHP
 cd "$BUILD_DIR"
-composer install --no-dev --no-scripts --no-plugins --no-autoloader --no-interaction || true
+echo "Using Node $(node -v) and npm $(npm -v) for Mautic build"
+echo "Running Composer bootstrap install"
+composer install --no-dev --no-scripts --no-plugins --no-autoloader --no-interaction
+echo "Generating optimized Composer autoloader"
 composer dump-autoload --optimize
+echo "Running full Composer install"
 composer install --no-dev --optimize-autoloader --no-interaction
 cd -
 
@@ -314,26 +318,31 @@ rm -rf "$BUILD_DIR"
 # composer is left in place for potential future runs but can be purged if desired
 # (no docker installed any more)
 
-# determine which scheme to use for the installer.  if DNS already
-# resolves to us we can use HTTPS directly; otherwise fall back to a loopback
-# entry (the older behaviour).
-if host "${DOMAIN}" >/dev/null 2>&1; then
+# determine which scheme to use for the installer.  only use HTTPS if a
+# certificate already exists; otherwise install over HTTP first.
+if [ -d "/etc/letsencrypt/live/${DOMAIN}" ]; then
     INSTALL_URL="https://${DOMAIN}"
 else
-    echo "127.0.0.1 ${DOMAIN}" >> /etc/hosts || true
+    if ! grep -Fq "127.0.0.1 ${DOMAIN}" /etc/hosts; then
+        echo "127.0.0.1 ${DOMAIN}" >> /etc/hosts
+    fi
     INSTALL_URL="http://${DOMAIN}"
 fi
 
 # run the installer.  it's fine to use HTTPS as long as the certificate is
 # already in place (LICENSES or pre‑provisioned by the user).
-sudo -u ${MAUTIC_USER} bash -c "cd ${MAUTIC_DIR} && php bin/console mautic:install ${INSTALL_URL} \
-    --db_user=${DB_USER} --db_password='${DB_PASS}' \
-    --db_name=${DB_NAME} --admin_email='${ADMIN_EMAIL}' \
-    --admin_password='${ADMIN_PASS}' \
-    --mailer_from_name='${MAILER_FROM_NAME}' --mailer_from_email='${ADMIN_EMAIL}' \
-    --mailer_transport=smtp --mailer_host=localhost --mailer_port=25 \
-    --timezone='${TIMEZONE}' --locale='${LOCALE}' \
-    --no-interaction"
+if [ -f "${MAUTIC_DIR}/config/local.php" ] || [ -f "${MAUTIC_DIR}/app/config/local.php" ]; then
+    echo "Mautic appears to be already installed; skipping mautic:install"
+else
+    sudo -u ${MAUTIC_USER} bash -c "cd ${MAUTIC_DIR} && php bin/console mautic:install ${INSTALL_URL} \
+        --db_user=${DB_USER} --db_password='${DB_PASS}' \
+        --db_name=${DB_NAME} --admin_email='${ADMIN_EMAIL}' \
+        --admin_password='${ADMIN_PASS}' \
+        --mailer_from_name='${MAILER_FROM_NAME}' --mailer_from_email='${ADMIN_EMAIL}' \
+        --mailer_transport=smtp --mailer_host=localhost --mailer_port=25 \
+        --timezone='${TIMEZONE}' --locale='${LOCALE}' \
+        --no-interaction"
+fi
 
 # === 9. SECURITY (UFW/FAIL2BAN) & SSL ===
 # firewall rules – only allow SSH and web traffic
@@ -371,7 +380,7 @@ cat <<EOF > /etc/cron.d/mautic
 EOF
 
 # rotate the Mautic log file; keep a week of history
-cat <<'LOGROT' > /etc/logrotate.d/mautic
+cat <<LOGROT > /etc/logrotate.d/mautic
 ${MAUTIC_DIR}/var/logs/*.log {
     daily
     rotate 7
@@ -400,13 +409,13 @@ chmod 600 /root/mautic-credentials.txt
 # path can be changed as desired; using `run-parts` allows us to drop a file
 # into /etc/cron.weekly instead of editing crontab directly.
 SCRIPT_PATH="/usr/local/bin/launch-mautic-lightsail.sh"
-if [ ! -e "$SCRIPT_PATH" ]; then
-    cp "$0" "$SCRIPT_PATH" && chmod +x "$SCRIPT_PATH"
+if [ ! -e "$SCRIPT_PATH" ] && [ -f "${SCRIPT_SOURCE_PATH}" ]; then
+    cp "${SCRIPT_SOURCE_PATH}" "$SCRIPT_PATH" && chmod +x "$SCRIPT_PATH"
 fi
-cat <<'CRON' > /etc/cron.weekly/mautic-provisioner
+cat <<CRON > /etc/cron.weekly/mautic-provisioner
 #!/bin/sh
 # re-run the provision script to apply any new configuration or updates
-$SCRIPT_PATH || true
+MAUTIC_PROVISION_FROM_CRON=1 ${SCRIPT_PATH} || true
 CRON
 chmod +x /etc/cron.weekly/mautic-provisioner
 
@@ -416,7 +425,7 @@ chmod +x /etc/cron.weekly/mautic-provisioner
 echo "=== PROVISIONING COMPLETE ==="
 # if running under cron we don't force a reboot; otherwise reboot the
 # freshly‑provisioned machine so that kernel updates etc. take effect.
-if [ -z "$CI" ] && [ "$0" = "/usr/local/bin/launch-mautic-lightsail.sh" ]; then
+if [ -z "${CI:-}" ] && [ -z "${MAUTIC_PROVISION_FROM_CRON:-}" ]; then
     reboot
 fi
 
