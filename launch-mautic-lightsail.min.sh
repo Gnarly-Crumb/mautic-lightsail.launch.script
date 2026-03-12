@@ -231,10 +231,30 @@ else
         --db_user=${DB_USER} --db_password='${DB_PASS}' \
         --db_name=${DB_NAME} --admin_email='${ADMIN_EMAIL}' \
         --admin_password='${ADMIN_PASS}' \
-        --mailer_from_name='${MAILER_FROM_NAME}' --mailer_from_email='${ADMIN_EMAIL}' \
-        --mailer_transport=smtp --mailer_host=localhost --mailer_port=25 \
-        --timezone='${TIMEZONE}' --locale='${LOCALE}' \
         --no-interaction"
+fi
+MAUTIC_CONFIG_FILE="${MAUTIC_DIR}/config/local.php"
+if [ ! -f "${MAUTIC_CONFIG_FILE}" ] && [ -f "${MAUTIC_DIR}/app/config/local.php" ]; then
+    MAUTIC_CONFIG_FILE="${MAUTIC_DIR}/app/config/local.php"
+fi
+if [ -f "${MAUTIC_CONFIG_FILE}" ]; then
+    echo "Configuring Mautic mailer settings in ${MAUTIC_CONFIG_FILE}"
+    php -r '
+        $file = $argv[1];
+        $fromName = $argv[2];
+        $fromEmail = $argv[3];
+        $mailerDsn = $argv[4];
+        $config = include $file;
+        if (!is_array($config)) {
+            fwrite(STDERR, "Unexpected Mautic config format\n");
+            exit(1);
+        }
+        $config["mailer_from_name"] = $fromName;
+        $config["mailer_from_email"] = $fromEmail;
+        $config["mailer_dsn"] = $mailerDsn;
+        file_put_contents($file, "<?php\nreturn ".var_export($config, true).";\n");
+    ' "${MAUTIC_CONFIG_FILE}" "${MAILER_FROM_NAME}" "${ADMIN_EMAIL}" "smtp://127.0.0.1:25"
+    chown ${MAUTIC_USER}:${MAUTIC_GROUP} "${MAUTIC_CONFIG_FILE}"
 fi
 ufw allow OpenSSH && ufw allow 'Nginx Full' && ufw --force enable
 sed -i 's/^#PermitRootLogin.*/PermitRootLogin no/' /etc/ssh/sshd_config
