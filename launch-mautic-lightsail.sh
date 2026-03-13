@@ -59,7 +59,7 @@ fi
 # base packages plus utilities required by Mautic and provisioning.
 apt-get update && apt-get -y upgrade
 apt-get install -y software-properties-common curl wget unzip git htop fail2ban ufw \
-    chrony gnupg lsb-release ca-certificates nginx mysql-server redis-server rsync \
+    chrony gnupg lsb-release ca-certificates nginx redis-server rsync \
     postfix unattended-upgrades monit
 
 # allow Composer to work as root (script already sets HOME)
@@ -111,6 +111,17 @@ systemctl enable --now monit
 
 # purge apt cache to minimize disk usage
 apt-get clean
+
+# Install MySQL 8.4 LTS from Oracle's APT repository instead of the distro
+# default MySQL package, which may lag behind Mautic's supported version floor.
+MYSQL_REPO_CODENAME="${CODENAME:-noble}"
+curl -fsSL https://repo.mysql.com/RPM-GPG-KEY-mysql-2023 | gpg --dearmor --yes -o /usr/share/keyrings/mysql.gpg
+cat <<EOF > /etc/apt/sources.list.d/mysql.list
+deb [signed-by=/usr/share/keyrings/mysql.gpg] http://repo.mysql.com/apt/ubuntu/ ${MYSQL_REPO_CODENAME} mysql-8.4-lts
+deb [signed-by=/usr/share/keyrings/mysql.gpg] http://repo.mysql.com/apt/ubuntu/ ${MYSQL_REPO_CODENAME} mysql-tools
+EOF
+apt-get update
+apt-get install -y mysql-server
 
 # === 3. PHP 8.3 SETUP & TUNING ===
 add-apt-repository ppa:ondrej/php -y && apt-get update
@@ -235,10 +246,8 @@ if [ ! -f "${BUILD_DIR}/index.php" ]; then
     fi
 fi
 
-# Mautic 7 requires the public/ directory to be the document root.
-# ignore any nested build structure; always deploy into ${MAUTIC_DIR} then
-# point nginx at ${MAUTIC_DIR}/public.
-WEBROOT_PATH="${MAUTIC_DIR}/public"
+# The release archive serves from the application root on this deployment.
+WEBROOT_PATH="${MAUTIC_DIR}"
 
 cat <<EOF > /etc/nginx/sites-available/mautic.conf
 server {

@@ -31,7 +31,7 @@ if [ ! -f /swapfile ]; then
 fi
 apt-get update && apt-get -y upgrade
 apt-get install -y software-properties-common curl wget unzip git htop fail2ban ufw \
-    chrony gnupg lsb-release ca-certificates nginx mysql-server redis-server rsync \
+    chrony gnupg lsb-release ca-certificates nginx redis-server rsync \
     postfix unattended-upgrades monit
 export COMPOSER_ALLOW_SUPERUSER=1
 postconf -e 'inet_interfaces = loopback-only'
@@ -73,6 +73,14 @@ MONIT
 chmod 600 /etc/monit/monitrc
 systemctl enable --now monit
 apt-get clean
+MYSQL_REPO_CODENAME="${CODENAME:-noble}"
+curl -fsSL https://repo.mysql.com/RPM-GPG-KEY-mysql-2023 | gpg --dearmor --yes -o /usr/share/keyrings/mysql.gpg
+cat <<EOF > /etc/apt/sources.list.d/mysql.list
+deb [signed-by=/usr/share/keyrings/mysql.gpg] http://repo.mysql.com/apt/ubuntu/ ${MYSQL_REPO_CODENAME} mysql-8.4-lts
+deb [signed-by=/usr/share/keyrings/mysql.gpg] http://repo.mysql.com/apt/ubuntu/ ${MYSQL_REPO_CODENAME} mysql-tools
+EOF
+apt-get update
+apt-get install -y mysql-server
 add-apt-repository ppa:ondrej/php -y && apt-get update
 apt-get install -y php8.3-fpm php8.3-cli php8.3-mysql php8.3-gd php8.3-mbstring \
     php8.3-xml php8.3-curl php8.3-zip php8.3-intl php8.3-imap php8.3-bcmath \
@@ -162,7 +170,7 @@ if [ ! -f "${BUILD_DIR}/index.php" ]; then
         BUILD_DIR="$subdir"
     fi
 fi
-WEBROOT_PATH="${MAUTIC_DIR}/public"
+WEBROOT_PATH="${MAUTIC_DIR}"
 cat <<EOF > /etc/nginx/sites-available/mautic.conf
 server {
     listen 80;
