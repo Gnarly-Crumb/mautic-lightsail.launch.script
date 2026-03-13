@@ -60,10 +60,12 @@ if [ "${CODENAME}" = "jammy" ] && [ ! -f "${UPGRADE_MARKER}" ]; then
 Description=Resume Mautic bootstrap after Ubuntu release upgrade
 After=network-online.target
 Wants=network-online.target
+ConditionPathExists=${UPGRADE_MARKER}
 
 [Service]
 Type=oneshot
 ExecStart=${BOOTSTRAP_SCRIPT_PATH}
+Restart=no
 
 [Install]
 WantedBy=multi-user.target
@@ -80,15 +82,15 @@ EOF
 fi
 CODENAME=$(lsb_release -cs || echo "")
 echo "Ubuntu codename after bootstrap: ${CODENAME}"
-if [ -f "${UPGRADE_MARKER}" ]; then
-    systemctl disable mautic-bootstrap.service >/dev/null 2>&1 || true
-    rm -f "${BOOTSTRAP_SERVICE}" "${UPGRADE_MARKER}"
-    systemctl daemon-reload >/dev/null 2>&1 || true
-fi
 if [ "${CODENAME}" != "noble" ]; then
     echo "ERROR: unsupported Ubuntu codename '${CODENAME}'. Provisioning requires Ubuntu 24.04 LTS (noble)." >&2
     exit 1
 fi
+cleanup_bootstrap() {
+    systemctl disable mautic-bootstrap.service >/dev/null 2>&1 || true
+    rm -f "${BOOTSTRAP_SERVICE}" "${UPGRADE_MARKER}"
+    systemctl daemon-reload >/dev/null 2>&1 || true
+}
 # third‑party repos should be added using this variable.  if a repo doesn't
 # yet support the current release (e.g. noble) you may need to fall back to
 # the previous LTS after verifying compatibility.
@@ -532,6 +534,9 @@ chmod +x /etc/cron.weekly/mautic-provisioner
 
 # note: this cron job will execute as root; it is safe because
 # the script is idempotent and most operations are guarded.
+if [ -f "${UPGRADE_MARKER}" ]; then
+    cleanup_bootstrap
+fi
 
 echo "=== PROVISIONING COMPLETE ==="
 # if running under cron we don't force a reboot; otherwise reboot the
