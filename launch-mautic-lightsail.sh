@@ -1,5 +1,11 @@
 #!/bin/sh
 # This header is for Dash. It immediately hands off the rest of the file to Bash.
+# Supported stack:
+# - Ubuntu 24.04 LTS (noble)
+# - Mautic 7.x
+# - PHP 8.3
+# - MySQL 8.4 LTS
+# This script is intended for a production Mautic host, not a frontend build environment.
 SCRIPT_SOURCE_PATH=$(readlink -f "$0" 2>/dev/null || printf '%s\n' "$0")
 export SCRIPT_SOURCE_PATH
 exec /bin/bash <<'PROVISIONER'
@@ -35,6 +41,10 @@ export HOME=/root
 # detect Ubuntu codename for repository lines; this avoids hardcoding "jammy"
 CODENAME=$(lsb_release -cs || echo "")
 echo "Using apt codename: $CODENAME"
+if [ "$CODENAME" != "noble" ]; then
+    echo "ERROR: unsupported Ubuntu codename '$CODENAME'. This provisioner supports only Ubuntu 24.04 LTS (noble)." >&2
+    exit 1
+fi
 # third‑party repos should be added using this variable.  if a repo doesn't
 # yet support the current release (e.g. noble) you may need to fall back to
 # the previous LTS after verifying compatibility.

@@ -22,6 +22,10 @@ export DEBIAN_FRONTEND=noninteractive
 export HOME=/root
 CODENAME=$(lsb_release -cs || echo "")
 echo "Using apt codename: $CODENAME"
+if [ "$CODENAME" != "noble" ]; then
+    echo "ERROR: unsupported Ubuntu codename '$CODENAME'. This provisioner supports only Ubuntu 24.04 LTS (noble)." >&2
+    exit 1
+fi
 timedatectl set-timezone "$TIMEZONE" || true
 until ping -c1 archive.ubuntu.com &>/dev/null; do sleep 2; done
 if [ ! -f /swapfile ]; then
