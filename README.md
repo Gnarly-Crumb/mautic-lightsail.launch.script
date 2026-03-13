@@ -1,11 +1,11 @@
 # Mautic Lightsail Provisioner
 
-This repository contains a shell script that bootstraps an Ubuntu (Lightsail) instance
-with everything needed to run [Mautic](https://www.mautic.org/).
+This repository contains a single shell script,
+`launch-mautic-lightsail.sh`, that bootstraps a supported Ubuntu Lightsail
+instance with everything needed to run [Mautic](https://www.mautic.org/).
 
-The primary script, `launch-mautic-lightsail.sh`, is written as a
-self-contained provisioning helper. When executed as **root** on a fresh VM it
-will:
+The script is written as a self-contained provisioning helper. When executed as
+**root** on a fresh Ubuntu 24.04 Lightsail VM it will:
 
 1. Perform basic system updates and install required packages (Nginx, PHP, MySQL,
    Redis, Postfix, etc.).
@@ -17,33 +17,47 @@ will:
 7. Add production cron jobs, logrotate rules and a weekly self‑update cron entry.
 8. Reboot the instance if appropriate.
 
-A minified version of the script – `launch-mautic-lightsail.min.sh` – has all
-comments and blank lines removed and is intended for use as EC2 user data under
-the 16 KB size limit.
-
 ## Usage
 
-1. Clone this repository onto your local machine or a control host.
+1. Use the Ubuntu 24.04 LTS Lightsail blueprint.
 
 2. Optionally customise defaults by creating `/root/.mautic_env` with variables
    such as `DOMAIN`, `ADMIN_EMAIL`, `TIMEZONE`, etc. The script will source this
    file if it exists and persist any generated credentials back to it.
 
-3. Upload the script to a new Ubuntu 22.04/24.04 (or other recent) Lightsail
-   instance and run it as root:
+3. To run the provisioner directly from a checked-out copy:
 
    ```sh
    sudo bash ./launch-mautic-lightsail.sh
    ```
 
-   Alternatively, supply the **minified** copy as EC2 user data:
+4. For Lightsail user data, use a tiny downloader bootstrap instead of
+   embedding the provisioner directly. Since this repository is public, the
+   simplest model is to download and run the full script from GitHub:
 
    ```sh
-   USERDATA=$(< launch-mautic-lightsail.min.sh)
-   aws lightsail create-instances --instance-names mautic --blueprint-id ubuntu_22_04 --user-data "$USERDATA" ...
+   #!/bin/bash
+   set -e
+   apt-get update
+   apt-get install -y curl ca-certificates
+   curl -fsSL https://raw.githubusercontent.com/Gnarly-Crumb/mautic-lightsail.launch.script/main/launch-mautic-lightsail.sh -o /root/launch-mautic-lightsail.sh
+   chmod +x /root/launch-mautic-lightsail.sh
+   bash /root/launch-mautic-lightsail.sh
    ```
 
-4. After provisioning completes, credentials will be available at
+   To pin deployments to an exact revision, replace `main` with a commit SHA:
+
+   ```sh
+   #!/bin/bash
+   set -e
+   apt-get update
+   apt-get install -y curl ca-certificates
+   curl -fsSL https://raw.githubusercontent.com/Gnarly-Crumb/mautic-lightsail.launch.script/COMMIT_SHA/launch-mautic-lightsail.sh -o /root/launch-mautic-lightsail.sh
+   chmod +x /root/launch-mautic-lightsail.sh
+   bash /root/launch-mautic-lightsail.sh
+   ```
+
+5. After provisioning completes, credentials will be available at
    `/root/mautic-credentials.txt` and the web UI should be accessible at
    `https://$DOMAIN`
 
@@ -52,8 +66,6 @@ the 16 KB size limit.
 * The script is idempotent and can be rerun safely; existing database passwords
   are preserved in `/root/.mautic_env`.
 * Logs are written to `/var/log/mautic-provision.log` for debugging failures.
-* The minified script is roughly 10 KB and is ideal for cloud-init
-  restrictions.
 * To upgrade PHP or Mautic versions, edit the `MAUTIC_VERSION` constant or
   modify the PPA line accordingly.
 * The `launch-mautic-lightsail.sh` file is designed to copy itself to
