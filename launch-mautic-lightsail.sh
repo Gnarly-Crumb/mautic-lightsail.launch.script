@@ -130,13 +130,18 @@ apt-get clean
 
 # Install MySQL 8.4 LTS from Oracle's APT repository instead of the distro
 # default MySQL package, which may lag behind Mautic's supported version floor.
-MYSQL_REPO_CODENAME="${CODENAME:-noble}"
-curl -fsSL https://repo.mysql.com/RPM-GPG-KEY-mysql-2023 | gpg --dearmor --yes -o /usr/share/keyrings/mysql.gpg
+MYSQL_REPO_CODENAME="noble"
+mkdir -p /etc/apt/keyrings
+rm -f /etc/apt/keyrings/mysql.gpg /usr/share/keyrings/mysql-archive-keyring.gpg
+curl -fsSL https://repo.mysql.com/RPM-GPG-KEY-mysql-2023 | gpg --dearmor --yes -o /etc/apt/keyrings/mysql.gpg
 cat <<EOF > /etc/apt/sources.list.d/mysql.list
-deb [signed-by=/usr/share/keyrings/mysql.gpg] http://repo.mysql.com/apt/ubuntu/ ${MYSQL_REPO_CODENAME} mysql-8.4-lts
-deb [signed-by=/usr/share/keyrings/mysql.gpg] http://repo.mysql.com/apt/ubuntu/ ${MYSQL_REPO_CODENAME} mysql-tools
+deb [signed-by=/etc/apt/keyrings/mysql.gpg] http://repo.mysql.com/apt/ubuntu/ ${MYSQL_REPO_CODENAME} mysql-8.4-lts
+deb [signed-by=/etc/apt/keyrings/mysql.gpg] http://repo.mysql.com/apt/ubuntu/ ${MYSQL_REPO_CODENAME} mysql-tools
 EOF
-apt-get update
+if ! apt-get update; then
+    echo "ERROR: failed to refresh APT metadata after MySQL keyring update" >&2
+    exit 1
+fi
 apt-get install -y mysql-server
 
 # === 3. PHP 8.3 SETUP & TUNING ===
