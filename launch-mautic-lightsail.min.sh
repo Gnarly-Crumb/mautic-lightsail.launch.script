@@ -153,13 +153,14 @@ systemctl restart mysql
 for i in {1..10}; do
     if mysql --protocol=socket -e "SELECT 1" >/dev/null 2>&1; then
         mysql --protocol=socket -e \
-            "ALTER USER 'root'@'localhost' IDENTIFIED WITH mysql_native_password BY '${DB_ROOT_PASS}'; FLUSH PRIVILEGES;"
+            "ALTER USER 'root'@'localhost' IDENTIFIED BY '${DB_ROOT_PASS}'; FLUSH PRIVILEGES;"
         break
     fi
     sleep 3
 done
 mysql -u root -p"${DB_ROOT_PASS}" -e "CREATE DATABASE IF NOT EXISTS \`${DB_NAME}\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;"
 mysql -u root -p"${DB_ROOT_PASS}" -e "CREATE USER IF NOT EXISTS '${DB_USER}'@'localhost' IDENTIFIED BY '${DB_PASS}';"
+mysql -u root -p"${DB_ROOT_PASS}" -e "ALTER USER '${DB_USER}'@'localhost' IDENTIFIED BY '${DB_PASS}';"
 mysql -u root -p"${DB_ROOT_PASS}" -e "GRANT ALL PRIVILEGES ON \`${DB_NAME}\`.* TO '${DB_USER}'@'localhost'; FLUSH PRIVILEGES;"
 sed -i 's/^# maxmemory <bytes>/maxmemory 256mb/' /etc/redis/redis.conf
 sed -i 's/^# maxmemory-policy noeviction/maxmemory-policy allkeys-lru/' /etc/redis/redis.conf
@@ -168,11 +169,15 @@ BUILD_DIR="/tmp/mautic_build"
 mkdir -p "$BUILD_DIR"
 wget -q "https://github.com/mautic/mautic/releases/download/${MAUTIC_VERSION}/${MAUTIC_VERSION}.zip" -O /tmp/mautic.zip
 unzip -o /tmp/mautic.zip -d "$BUILD_DIR"
-if [ ! -f "${BUILD_DIR}/index.php" ]; then
-    subdir=$(find "$BUILD_DIR" -mindepth 1 -maxdepth 1 -type d | head -n1 || true)
+if [ ! -f "${BUILD_DIR}/bin/console" ]; then
+    subdir=$(find "$BUILD_DIR" -mindepth 1 -maxdepth 1 -type d -exec test -f "{}/bin/console" ';' -print -quit)
     if [ -n "$subdir" ]; then
         BUILD_DIR="$subdir"
     fi
+fi
+if [ ! -f "${BUILD_DIR}/bin/console" ]; then
+    echo "ERROR: unable to locate Mautic application root in ${BUILD_DIR}" >&2
+    exit 1
 fi
 WEBROOT_PATH="${MAUTIC_DIR}"
 cat <<EOF > /etc/nginx/sites-available/mautic.conf

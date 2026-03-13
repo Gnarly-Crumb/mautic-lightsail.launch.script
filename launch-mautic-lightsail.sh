@@ -216,14 +216,13 @@ collation-server = utf8mb4_unicode_ci
 EOF
 systemctl restart mysql
 
-# Robust MySQL Socket-to-Password transition.  we attempt to authenticate
-# as root with the unix socket (no password) and then immediately lock the
-# account with a random password.  if the `mysql` client fails due to the
-# password being required we loop until the service is ready.
+# Robust MySQL Socket-to-Password transition. We attempt to authenticate
+# as root with the unix socket (no password) and then immediately set a
+# password without forcing an auth plugin that may not exist in MySQL 8.4.
 for i in {1..10}; do
     if mysql --protocol=socket -e "SELECT 1" >/dev/null 2>&1; then
         mysql --protocol=socket -e \
-            "ALTER USER 'root'@'localhost' IDENTIFIED WITH mysql_native_password BY '${DB_ROOT_PASS}'; FLUSH PRIVILEGES;"
+            "ALTER USER 'root'@'localhost' IDENTIFIED BY '${DB_ROOT_PASS}'; FLUSH PRIVILEGES;"
         break
     fi
     sleep 3
@@ -232,6 +231,7 @@ done
 # after the password has been set use it for the rest of the provisioning
 mysql -u root -p"${DB_ROOT_PASS}" -e "CREATE DATABASE IF NOT EXISTS \`${DB_NAME}\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;"
 mysql -u root -p"${DB_ROOT_PASS}" -e "CREATE USER IF NOT EXISTS '${DB_USER}'@'localhost' IDENTIFIED BY '${DB_PASS}';"
+mysql -u root -p"${DB_ROOT_PASS}" -e "ALTER USER '${DB_USER}'@'localhost' IDENTIFIED BY '${DB_PASS}';"
 mysql -u root -p"${DB_ROOT_PASS}" -e "GRANT ALL PRIVILEGES ON \`${DB_NAME}\`.* TO '${DB_USER}'@'localhost'; FLUSH PRIVILEGES;"
 
 # === 5. TUNING (REDIS) ===
@@ -246,14 +246,16 @@ wget -q "https://github.com/mautic/mautic/releases/download/${MAUTIC_VERSION}/${
 unzip -o /tmp/mautic.zip -d "$BUILD_DIR"
 
 # some release archives contain a top-level subdirectory (e.g. mautic-7.0.1/).
-# if that's the case, switch BUILD_DIR to that subdirectory so later rsync and
-# php commands operate on the actual application root.  otherwise the files
-# end up nested and `php bin/console` cannot be found.
-if [ ! -f "${BUILD_DIR}/index.php" ]; then
-    subdir=$(find "$BUILD_DIR" -mindepth 1 -maxdepth 1 -type d | head -n1 || true)
+# use bin/console as the app-root signal, since that's what the installer uses.
+if [ ! -f "${BUILD_DIR}/bin/console" ]; then
+    subdir=$(find "$BUILD_DIR" -mindepth 1 -maxdepth 1 -type d -exec test -f "{}/bin/console" ';' -print -quit)
     if [ -n "$subdir" ]; then
         BUILD_DIR="$subdir"
     fi
+fi
+if [ ! -f "${BUILD_DIR}/bin/console" ]; then
+    echo "ERROR: unable to locate Mautic application root in ${BUILD_DIR}" >&2
+    exit 1
 fi
 
 # The release archive serves from the application root on this deployment.
