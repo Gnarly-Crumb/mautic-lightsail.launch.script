@@ -219,14 +219,24 @@ systemctl restart mysql
 # Robust MySQL Socket-to-Password transition. We attempt to authenticate
 # as root with the unix socket (no password) and then immediately set a
 # password without forcing an auth plugin that may not exist in MySQL 8.4.
+ROOT_AUTH_READY=0
 for i in {1..10}; do
     if mysql --protocol=socket -e "SELECT 1" >/dev/null 2>&1; then
         mysql --protocol=socket -e \
             "ALTER USER 'root'@'localhost' IDENTIFIED BY '${DB_ROOT_PASS}'; FLUSH PRIVILEGES;"
+        ROOT_AUTH_READY=1
+        break
+    fi
+    if mysql -u root -p"${DB_ROOT_PASS}" -e "SELECT 1" >/dev/null 2>&1; then
+        ROOT_AUTH_READY=1
         break
     fi
     sleep 3
 done
+[ "${ROOT_AUTH_READY}" -eq 1 ] || {
+    echo "ERROR: unable to authenticate to MySQL as root after bootstrap" >&2
+    exit 1
+}
 
 # after the password has been set use it for the rest of the provisioning
 mysql -u root -p"${DB_ROOT_PASS}" -e "CREATE DATABASE IF NOT EXISTS \`${DB_NAME}\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;"
@@ -246,14 +256,18 @@ wget -q "https://github.com/mautic/mautic/releases/download/${MAUTIC_VERSION}/${
 unzip -o /tmp/mautic.zip -d "$BUILD_DIR"
 
 # some release archives contain a top-level subdirectory (e.g. mautic-7.0.1/).
-# use bin/console as the app-root signal, since that's what the installer uses.
-if [ ! -f "${BUILD_DIR}/bin/console" ]; then
-    subdir=$(find "$BUILD_DIR" -mindepth 1 -maxdepth 1 -type d -exec test -f "{}/bin/console" ';' -print -quit)
+# validate the app root using the files the deploy/install path actually needs.
+if [ ! -f "${BUILD_DIR}/bin/console" ] || [ ! -f "${BUILD_DIR}/index.php" ] || [ ! -f "${BUILD_DIR}/composer.json" ]; then
+    subdir=$(find "$BUILD_DIR" -mindepth 1 -maxdepth 1 -type d \
+        -exec test -f "{}/bin/console" ';' \
+        -exec test -f "{}/index.php" ';' \
+        -exec test -f "{}/composer.json" ';' \
+        -print -quit)
     if [ -n "$subdir" ]; then
         BUILD_DIR="$subdir"
     fi
 fi
-if [ ! -f "${BUILD_DIR}/bin/console" ]; then
+if [ ! -f "${BUILD_DIR}/bin/console" ] || [ ! -f "${BUILD_DIR}/index.php" ] || [ ! -f "${BUILD_DIR}/composer.json" ]; then
     echo "ERROR: unable to locate Mautic application root in ${BUILD_DIR}" >&2
     exit 1
 fi
@@ -403,6 +417,25 @@ if [ ! -d "/etc/letsencrypt/live/${DOMAIN}" ]; then
     snap install --classic certbot && ln -sf /snap/bin/certbot /usr/bin/certbot
     certbot --nginx -d "$DOMAIN" -m "$ADMIN_EMAIL" --agree-tos --non-interactive --redirect || true
 fi
+FINAL_URL="${INSTALL_URL}"
+if [ -d "/etc/letsencrypt/live/${DOMAIN}" ]; then
+    FINAL_URL="https://${DOMAIN}"
+    if [ -f "${MAUTIC_CONFIG_FILE}" ]; then
+        echo "Updating Mautic site URL to ${FINAL_URL}"
+        php -r '
+            $file = $argv[1];
+            $siteUrl = $argv[2];
+            $config = include $file;
+            if (!is_array($config)) {
+                fwrite(STDERR, "Unexpected Mautic config format\n");
+                exit(1);
+            }
+            $config["site_url"] = $siteUrl;
+            file_put_contents($file, "<?php\nreturn ".var_export($config, true).";\n");
+        ' "${MAUTIC_CONFIG_FILE}" "${FINAL_URL}"
+        chown ${MAUTIC_USER}:${MAUTIC_GROUP} "${MAUTIC_CONFIG_FILE}"
+    fi
+fi
 
 # === 10. CRONS & FINALIZATION ===
 cat <<EOF > /etc/cron.d/mautic
@@ -430,7 +463,7 @@ rm -rf /var/lib/apt/lists/*
 
 # update human-readable credentials file
 cat <<CRED > /root/mautic-credentials.txt
-URL: ${INSTALL_URL}
+URL: ${FINAL_URL}
 Admin: ${ADMIN_EMAIL}
 Pass: ${ADMIN_PASS}
 DB_ROOT_PASS: ${DB_ROOT_PASS}

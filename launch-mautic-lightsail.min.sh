@@ -150,14 +150,24 @@ character-set-server = utf8mb4
 collation-server = utf8mb4_unicode_ci
 EOF
 systemctl restart mysql
+ROOT_AUTH_READY=0
 for i in {1..10}; do
     if mysql --protocol=socket -e "SELECT 1" >/dev/null 2>&1; then
         mysql --protocol=socket -e \
             "ALTER USER 'root'@'localhost' IDENTIFIED BY '${DB_ROOT_PASS}'; FLUSH PRIVILEGES;"
+        ROOT_AUTH_READY=1
+        break
+    fi
+    if mysql -u root -p"${DB_ROOT_PASS}" -e "SELECT 1" >/dev/null 2>&1; then
+        ROOT_AUTH_READY=1
         break
     fi
     sleep 3
 done
+[ "${ROOT_AUTH_READY}" -eq 1 ] || {
+    echo "ERROR: unable to authenticate to MySQL as root after bootstrap" >&2
+    exit 1
+}
 mysql -u root -p"${DB_ROOT_PASS}" -e "CREATE DATABASE IF NOT EXISTS \`${DB_NAME}\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;"
 mysql -u root -p"${DB_ROOT_PASS}" -e "CREATE USER IF NOT EXISTS '${DB_USER}'@'localhost' IDENTIFIED BY '${DB_PASS}';"
 mysql -u root -p"${DB_ROOT_PASS}" -e "ALTER USER '${DB_USER}'@'localhost' IDENTIFIED BY '${DB_PASS}';"
@@ -169,13 +179,17 @@ BUILD_DIR="/tmp/mautic_build"
 mkdir -p "$BUILD_DIR"
 wget -q "https://github.com/mautic/mautic/releases/download/${MAUTIC_VERSION}/${MAUTIC_VERSION}.zip" -O /tmp/mautic.zip
 unzip -o /tmp/mautic.zip -d "$BUILD_DIR"
-if [ ! -f "${BUILD_DIR}/bin/console" ]; then
-    subdir=$(find "$BUILD_DIR" -mindepth 1 -maxdepth 1 -type d -exec test -f "{}/bin/console" ';' -print -quit)
+if [ ! -f "${BUILD_DIR}/bin/console" ] || [ ! -f "${BUILD_DIR}/index.php" ] || [ ! -f "${BUILD_DIR}/composer.json" ]; then
+    subdir=$(find "$BUILD_DIR" -mindepth 1 -maxdepth 1 -type d \
+        -exec test -f "{}/bin/console" ';' \
+        -exec test -f "{}/index.php" ';' \
+        -exec test -f "{}/composer.json" ';' \
+        -print -quit)
     if [ -n "$subdir" ]; then
         BUILD_DIR="$subdir"
     fi
 fi
-if [ ! -f "${BUILD_DIR}/bin/console" ]; then
+if [ ! -f "${BUILD_DIR}/bin/console" ] || [ ! -f "${BUILD_DIR}/index.php" ] || [ ! -f "${BUILD_DIR}/composer.json" ]; then
     echo "ERROR: unable to locate Mautic application root in ${BUILD_DIR}" >&2
     exit 1
 fi
@@ -289,6 +303,25 @@ if [ ! -d "/etc/letsencrypt/live/${DOMAIN}" ]; then
     snap install --classic certbot && ln -sf /snap/bin/certbot /usr/bin/certbot
     certbot --nginx -d "$DOMAIN" -m "$ADMIN_EMAIL" --agree-tos --non-interactive --redirect || true
 fi
+FINAL_URL="${INSTALL_URL}"
+if [ -d "/etc/letsencrypt/live/${DOMAIN}" ]; then
+    FINAL_URL="https://${DOMAIN}"
+    if [ -f "${MAUTIC_CONFIG_FILE}" ]; then
+        echo "Updating Mautic site URL to ${FINAL_URL}"
+        php -r '
+            $file = $argv[1];
+            $siteUrl = $argv[2];
+            $config = include $file;
+            if (!is_array($config)) {
+                fwrite(STDERR, "Unexpected Mautic config format\n");
+                exit(1);
+            }
+            $config["site_url"] = $siteUrl;
+            file_put_contents($file, "<?php\nreturn ".var_export($config, true).";\n");
+        ' "${MAUTIC_CONFIG_FILE}" "${FINAL_URL}"
+        chown ${MAUTIC_USER}:${MAUTIC_GROUP} "${MAUTIC_CONFIG_FILE}"
+    fi
+fi
 cat <<EOF > /etc/cron.d/mautic
 # Mautic 7 production crons (every 5 minutes)
 */5 * * * * ${MAUTIC_USER} php ${MAUTIC_DIR}/bin/console mautic:segments:update > /dev/null 2>&1
@@ -308,7 +341,7 @@ ${MAUTIC_DIR}/var/logs/*.log {
 LOGROT
 rm -rf /var/lib/apt/lists/*
 cat <<CRED > /root/mautic-credentials.txt
-URL: ${INSTALL_URL}
+URL: ${FINAL_URL}
 Admin: ${ADMIN_EMAIL}
 Pass: ${ADMIN_PASS}
 DB_ROOT_PASS: ${DB_ROOT_PASS}
