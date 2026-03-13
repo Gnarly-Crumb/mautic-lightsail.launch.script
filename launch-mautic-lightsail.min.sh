@@ -20,10 +20,52 @@ LOCALE="${LOCALE:-en}"
 MAILER_FROM_NAME="${MAILER_FROM_NAME:-Mautic}"
 export DEBIAN_FRONTEND=noninteractive
 export HOME=/root
+UPGRADE_MARKER="/root/.mautic_os_upgraded"
+BOOTSTRAP_SCRIPT_PATH="/usr/local/bin/launch-mautic-lightsail.sh"
+BOOTSTRAP_SERVICE="/etc/systemd/system/mautic-bootstrap.service"
 CODENAME=$(lsb_release -cs || echo "")
-echo "Using apt codename: $CODENAME"
-if [ "$CODENAME" != "noble" ]; then
-    echo "ERROR: unsupported Ubuntu codename '$CODENAME'. This provisioner supports only Ubuntu 24.04 LTS (noble)." >&2
+echo "Detected Ubuntu codename: ${CODENAME}"
+if [ "${CODENAME}" = "jammy" ] && [ ! -f "${UPGRADE_MARKER}" ]; then
+    echo "Upgrading Ubuntu 22.04 (jammy) to 24.04 (noble) before provisioning"
+    apt-get update
+    apt-get -y upgrade
+    apt-get install -y ubuntu-release-upgrader-core
+    sed -i 's/^Prompt=.*/Prompt=lts/' /etc/update-manager/release-upgrades
+    if [ ! -e "${BOOTSTRAP_SCRIPT_PATH}" ] && [ -f "${SCRIPT_SOURCE_PATH}" ]; then
+        cp "${SCRIPT_SOURCE_PATH}" "${BOOTSTRAP_SCRIPT_PATH}"
+        chmod +x "${BOOTSTRAP_SCRIPT_PATH}"
+    fi
+    cat <<EOF > "${BOOTSTRAP_SERVICE}"
+[Unit]
+Description=Resume Mautic bootstrap after Ubuntu release upgrade
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=${BOOTSTRAP_SCRIPT_PATH}
+
+[Install]
+WantedBy=multi-user.target
+EOF
+    systemctl enable mautic-bootstrap.service
+    touch "${UPGRADE_MARKER}"
+    do-release-upgrade -f DistUpgradeViewNonInteractive || {
+        echo "ERROR: Ubuntu release upgrade failed" >&2
+        exit 1
+    }
+    reboot
+    exit 0
+fi
+CODENAME=$(lsb_release -cs || echo "")
+echo "Ubuntu codename after bootstrap: ${CODENAME}"
+if [ -f "${UPGRADE_MARKER}" ]; then
+    systemctl disable mautic-bootstrap.service >/dev/null 2>&1 || true
+    rm -f "${BOOTSTRAP_SERVICE}" "${UPGRADE_MARKER}"
+    systemctl daemon-reload >/dev/null 2>&1 || true
+fi
+if [ "${CODENAME}" != "noble" ]; then
+    echo "ERROR: unsupported Ubuntu codename '${CODENAME}'. Provisioning requires Ubuntu 24.04 LTS (noble)." >&2
     exit 1
 fi
 timedatectl set-timezone "$TIMEZONE" || true
