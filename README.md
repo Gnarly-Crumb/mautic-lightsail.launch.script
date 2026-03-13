@@ -31,18 +31,13 @@ The script is written as a self-contained provisioning helper. When executed as
    sudo bash ./launch-mautic-lightsail.sh
    ```
 
-4. For Lightsail user data, use a tiny downloader bootstrap instead of
-   embedding the provisioner directly. Since this repository is public, the
-   simplest model is to download and run the full script from GitHub:
+4. For Lightsail user data, use [lightsail-bootstrap.sh](/home/gsparrish/mautic-lightsail.launch.script/lightsail-bootstrap.sh)
+   instead of embedding the full provisioner directly. It is a tiny downloader
+   that installs `curl` and `ca-certificates`, fetches
+   `launch-mautic-lightsail.sh` from GitHub, and runs it:
 
    ```sh
-   #!/bin/bash
-   set -e
-   apt-get update
-   apt-get install -y curl ca-certificates
-   curl -fsSL https://raw.githubusercontent.com/Gnarly-Crumb/mautic-lightsail.launch.script/main/launch-mautic-lightsail.sh -o /root/launch-mautic-lightsail.sh
-   chmod +x /root/launch-mautic-lightsail.sh
-   bash /root/launch-mautic-lightsail.sh
+   cat lightsail-bootstrap.sh
    ```
 
    To pin deployments to an exact revision, replace `main` with a commit SHA:
