@@ -138,8 +138,15 @@ rm -f "$MYSQL_KEYRING"
 
 # Import both MySQL signing keys into dedicated keyring
 echo "Fetching MySQL GPG keys for key transition period..."
-curl -fsSL https://repo.mysql.com/RPM-GPG-KEY-mysql-2023 | gpg --dearmor --yes --output "$MYSQL_KEYRING"
-curl -fsSL https://repo.mysql.com/RPM-GPG-KEY-mysql-2025 | gpg --dearmor --import-options merge-only --import --yes --output "$MYSQL_KEYRING"
+# Use a temporary directory to hold individual binary keys
+TEMP_KEYDIR=$(mktemp -d)
+trap "rm -rf '$TEMP_KEYDIR'" EXIT
+# Fetch and dearmor first key (2023)
+curl -fsSL https://repo.mysql.com/RPM-GPG-KEY-mysql-2023 | gpg --dearmor > "$TEMP_KEYDIR/key1.gpg"
+# Fetch and dearmor second key (2025)
+curl -fsSL https://repo.mysql.com/RPM-GPG-KEY-mysql-2025 | gpg --dearmor > "$TEMP_KEYDIR/key2.gpg"
+# Combine both binary keys into the final dedicated keyring
+cat "$TEMP_KEYDIR/key1.gpg" "$TEMP_KEYDIR/key2.gpg" > "$MYSQL_KEYRING"
 
 # Create MySQL APT source list
 cat <<EOF > /etc/apt/sources.list.d/mysql.list
