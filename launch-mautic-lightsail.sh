@@ -130,16 +130,30 @@ apt-get clean
 
 # Install MySQL 8.4 LTS from Oracle's APT repository instead of the distro
 # default MySQL package, which may lag behind Mautic's supported version floor.
+# Oracle is currently transitioning signing keys; we import both 2023 and 2025 keys.
 MYSQL_REPO_CODENAME="noble"
+MYSQL_KEYRING="/etc/apt/keyrings/mysql.gpg"
 mkdir -p /etc/apt/keyrings
-rm -f /etc/apt/keyrings/mysql.gpg /usr/share/keyrings/mysql-archive-keyring.gpg
-curl -fsSL https://repo.mysql.com/RPM-GPG-KEY-mysql-2023 | gpg --dearmor --yes -o /etc/apt/keyrings/mysql.gpg
+rm -f "$MYSQL_KEYRING"
+
+# Import both MySQL signing keys into dedicated keyring
+echo "Fetching MySQL GPG keys for key transition period..."
+curl -fsSL https://repo.mysql.com/RPM-GPG-KEY-mysql-2023 | gpg --dearmor --yes --output "$MYSQL_KEYRING"
+curl -fsSL https://repo.mysql.com/RPM-GPG-KEY-mysql-2025 | gpg --dearmor --import-options merge-only --import --yes --output "$MYSQL_KEYRING"
+
+# Create MySQL APT source list
 cat <<EOF > /etc/apt/sources.list.d/mysql.list
-deb [signed-by=/etc/apt/keyrings/mysql.gpg] http://repo.mysql.com/apt/ubuntu/ ${MYSQL_REPO_CODENAME} mysql-8.4-lts
-deb [signed-by=/etc/apt/keyrings/mysql.gpg] http://repo.mysql.com/apt/ubuntu/ ${MYSQL_REPO_CODENAME} mysql-tools
+deb [signed-by=${MYSQL_KEYRING}] http://repo.mysql.com/apt/ubuntu/ ${MYSQL_REPO_CODENAME} mysql-8.4-lts
+deb [signed-by=${MYSQL_KEYRING}] http://repo.mysql.com/apt/ubuntu/ ${MYSQL_REPO_CODENAME} mysql-tools
 EOF
-if ! apt-get update; then
-    echo "ERROR: failed to refresh APT metadata after MySQL keyring update" >&2
+
+# Attempt to refresh APT metadata with new MySQL keyring
+echo "Refreshing APT metadata with MySQL keyring..."
+if ! apt-get update 2>&1 | tee /tmp/apt-update.log; then
+    echo "ERROR: failed to refresh APT metadata after MySQL keyring update." >&2
+    echo "Oracle's repository metadata signature is currently not usable for unattended noble bootstrap." >&2
+    echo "APT output:" >&2
+    cat /tmp/apt-update.log >&2
     exit 1
 fi
 apt-get install -y mysql-server
@@ -404,14 +418,6 @@ if [ -f "${MAUTIC_CONFIG_FILE}" ]; then
 fi
 
 # === 9. SECURITY (UFW/FAIL2BAN) & SSL ===
-# firewall rules – only allow SSH and web traffic
-ufw allow OpenSSH && ufw allow 'Nginx Full' && ufw --force enable
-
-# basic SSH hardening for a single‑purpose host
-sed -i 's/^#PermitRootLogin.*/PermitRootLogin no/' /etc/ssh/sshd_config
-sed -i 's/^#PasswordAuthentication.*/PasswordAuthentication no/' /etc/ssh/sshd_config
-systemctl restart sshd
-
 # fail2ban already installed; add nginx + ssh jails if absent
 cat <<'EOF' > /etc/fail2ban/jail.d/mautic.local
 [sshd]
@@ -421,6 +427,19 @@ enabled = true
 enabled = true
 EOF
 systemctl restart fail2ban
+
+# === OPTIONAL SSH HARDENING (MANUAL POST-INSTALL) ===
+# The following SSH hardening steps are commented out by default to prevent
+# SSH lockout during unattended initial provisioning. If you need to harden
+# SSH access after confirming connectivity, uncomment and run manually:
+#
+# sed -i 's/^#PermitRootLogin.*/PermitRootLogin no/' /etc/ssh/sshd_config
+# sed -i 's/^#PasswordAuthentication.*/PasswordAuthentication no/' /etc/ssh/sshd_config
+# systemctl restart sshd
+#
+# You may also want to restrict SSH access by IP using:
+#   sed -i 's/^#ListenAddress/ListenAddress 0.0.0.0/' /etc/ssh/sshd_config
+# Then restart sshd.
 
 # only request a certificate if one doesn't already exist; this allows the
 # script to be rerun without hitting Let's Encrypt rate limits.
@@ -496,6 +515,19 @@ cat <<CRON > /etc/cron.weekly/mautic-provisioner
 MAUTIC_PROVISION_FROM_CRON=1 ${SCRIPT_PATH} || true
 CRON
 chmod +x /etc/cron.weekly/mautic-provisioner
+
+# === OPTIONAL FIREWALL ENABLEMENT ===
+# UFW is installed but disabled by default to prevent SSH lockout during
+# unattended provisioning. To enable the firewall after confirming SSH access,
+# set ENABLE_UFW=1 in /root/.mautic_env and re-run the script, or manually run:
+#   ufw allow OpenSSH
+#   ufw allow 'Nginx Full'
+#   ufw --force enable
+if [ "${ENABLE_UFW:-0}" = "1" ]; then
+    echo "Enabling UFW firewall..."
+    ufw allow OpenSSH && ufw allow 'Nginx Full' && ufw --force enable
+    echo "UFW firewall enabled."
+fi
 
 touch "${SUCCESS_MARKER}"
 echo "=== PROVISIONING COMPLETE ==="
