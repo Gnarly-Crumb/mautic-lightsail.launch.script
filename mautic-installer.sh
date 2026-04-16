@@ -1,0 +1,119 @@
+#!/bin/bash
+set -euo pipefail
+
+DOMAIN="${DOMAIN:-ems.mympress.com}"
+ADMIN_EMAIL="${ADMIN_EMAIL:-administrator@mympress.com}"
+TIMEZONE="${TIMEZONE:-UTC}"
+LOCALE="${LOCALE:-en}"
+MAILER_FROM_NAME="${MAILER_FROM_NAME:-Mautic}"
+
+DB_NAME="${DB_NAME:-ems_mautic}"
+DB_USER="${DB_USER:-ems_mautic_user}"
+DB_PASS="${DB_PASS:-$(openssl rand -base64 24)}"
+ADMIN_PASS="${ADMIN_PASS:-$(openssl rand -base64 18)}"
+DB_ROOT_PASS="${DB_ROOT_PASS:-}"
+
+MAUTIC_VERSION="7.0.1"
+MAUTIC_DIR="/var/www/mautic"
+MAUTIC_USER="www-data"
+LOG_FILE="/var/log/mautic-installer.log"
+SUCCESS_MARKER="/root/.mautic_install_complete"
+CREDS_FILE="/root/mautic-credentials.txt"
+ENV_FILE="/root/.mautic_env"
+
+exec > >(tee -a "${LOG_FILE}") 2>&1
+export DEBIAN_FRONTEND=noninteractive
+export COMPOSER_ALLOW_SUPERUSER=1
+
+echo "=== MAUTIC INSTALL START $(date) ==="
+
+if [ -f "${ENV_FILE}" ]; then
+  # shellcheck disable=SC1090
+  . "${ENV_FILE}"
+fi
+
+if [ -f "${SUCCESS_MARKER}" ]; then
+  echo "Mautic already installed."
+  cat "${CREDS_FILE}" 2>/dev/null || true
+  exit 0
+fi
+
+CODENAME="$(lsb_release -cs || true)"
+if [ "${CODENAME}" != "noble" ]; then
+  echo "ERROR: Ubuntu 24.04 LTS (noble) is required." >&2
+  exit 1
+fi
+
+for cmd in php composer nginx mysql; do
+  command -v "${cmd}" >/dev/null 2>&1 || {
+    echo "ERROR: required command missing: ${cmd}" >&2
+    exit 1
+  }
+done
+
+MYSQL_VERSION="$(mysql --version || true)"
+echo "Detected MySQL: ${MYSQL_VERSION}"
+if ! echo "${MYSQL_VERSION}" | grep -Eq 'Distrib 8\.(4|[5-9]|[1-9][0-9])|Ver 8\.(4|[5-9]|[1-9][0-9])'; then
+  echo "ERROR: MySQL 8.4+ is required." >&2
+  exit 1
+fi
+
+run_mysql_root() {
+  if mysql --protocol=socket -e "SELECT 1" >/dev/null 2>&1; then
+    mysql --protocol=socket "$@"
+  elif [ -n "${DB_ROOT_PASS}" ] && mysql -u root -p"${DB_ROOT_PASS}" -e "SELECT 1" >/dev/null 2>&1; then
+    mysql -u root -p"${DB_ROOT_PASS}" "$@"
+  else
+    echo "ERROR: cannot authenticate to MySQL as root. Use socket auth or export DB_ROOT_PASS." >&2
+    exit 1
+  fi
+}
+
+echo "STEP 1/7: database"
+run_mysql_root -e "CREATE DATABASE IF NOT EXISTS \`${DB_NAME}\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;"
+run_mysql_root -e "CREATE USER IF NOT EXISTS '${DB_USER}'@'localhost' IDENTIFIED BY '${DB_PASS}';"
+run_mysql_root -e "ALTER USER '${DB_USER}'@'localhost' IDENTIFIED BY '${DB_PASS}';"
+run_mysql_root -e "GRANT ALL PRIVILEGES ON \`${DB_NAME}\`.* TO '${DB_USER}'@'localhost'; FLUSH PRIVILEGES;"
+mysql -u "${DB_USER}" -p"${DB_PASS}" -h 127.0.0.1 -D "${DB_NAME}" -e "SELECT 1;" >/dev/null
+
+echo "STEP 2/7: mautic source install"
+if [ ! -f "${MAUTIC_DIR}/composer.json" ]; then
+  rm -rf "${MAUTIC_DIR}"
+  composer create-project mautic/recommended-project "${MAUTIC_DIR}" "${MAUTIC_VERSION}" \
+    --no-interaction --prefer-dist --no-progress
+fi
+
+chown -R ${MAUTIC_USER}:${MAUTIC_USER} "${MAUTIC_DIR}"
+find "${MAUTIC_DIR}" -type d -exec chmod 775 {} \;
+find "${MAUTIC_DIR}" -type f -exec chmod 664 {} \;
+mkdir -p "${MAUTIC_DIR}/var"
+chmod -R 775 "${MAUTIC_DIR}/var"
+
+echo "STEP 3/7: nginx final vhost"
+cat > /etc/nginx/sites-available/mautic <<EOF
+server {
+    listen 80;
+    server_name ${DOMAIN};
+    root ${MAUTIC_DIR}/public;
+    index index.php;
+
+    client_max_body_size 100M;
+    fastcgi_buffers 16 16k;
+    fastcgi_buffer_size 32k;
+
+    location / {
+        try_files \$uri /index.php\$is_args\$args;
+    }
+
+    location ~ ^/index\.php(/|$) {
+        include snippets/fastcgi-php.conf;
+        fastcgi_pass unix:/run/php/php8.3-fpm.sock;
+        fastcgi_param SCRIPT_FILENAME \$realpath_root\$fastcgi_script_name;
+        fastcgi_param DOCUMENT_ROOT \$realpath_root;
+        fastcgi_read_timeout 300;
+    }
+
+    location ~* /(config|var|bin|app)/ {
+        deny all;
+    }
+}
