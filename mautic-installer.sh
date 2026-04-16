@@ -79,8 +79,7 @@ mysql -u "${DB_USER}" -p"${DB_PASS}" -h 127.0.0.1 -D "${DB_NAME}" -e "SELECT 1;"
 echo "STEP 2/7: mautic source install"
 if [ ! -f "${MAUTIC_DIR}/composer.json" ]; then
   rm -rf "${MAUTIC_DIR}"
-  composer create-project mautic/recommended-project "${MAUTIC_DIR}" "${MAUTIC_VERSION}" \
-    --no-interaction --prefer-dist --no-progress
+  composer create-project mautic/recommended-project "${MAUTIC_DIR}" "${MAUTIC_VERSION}"     --no-interaction --prefer-dist --no-progress
 fi
 
 chown -R ${MAUTIC_USER}:${MAUTIC_USER} "${MAUTIC_DIR}"
@@ -117,3 +116,91 @@ server {
         deny all;
     }
 }
+EOF
+ln -sf /etc/nginx/sites-available/mautic /etc/nginx/sites-enabled/mautic
+rm -f /etc/nginx/sites-enabled/default
+nginx -t
+systemctl reload nginx
+
+echo "STEP 4/7: SSL best effort"
+if [ ! -d "/etc/letsencrypt/live/${DOMAIN}" ]; then
+  certbot --nginx -d "${DOMAIN}" -m "${ADMIN_EMAIL}" --agree-tos --non-interactive --redirect || true
+fi
+
+FINAL_URL="http://${DOMAIN}"
+if [ -d "/etc/letsencrypt/live/${DOMAIN}" ]; then
+  FINAL_URL="https://${DOMAIN}"
+fi
+
+echo "STEP 5/7: mautic cli install"
+CONFIG_FILE="${MAUTIC_DIR}/config/local.php"
+if [ ! -f "${CONFIG_FILE}" ]; then
+  sudo -u ${MAUTIC_USER} php "${MAUTIC_DIR}/bin/console" mautic:install "${FINAL_URL}"     --db_driver=pdo_mysql     --db_host=127.0.0.1     --db_port=3306     --db_name="${DB_NAME}"     --db_user="${DB_USER}"     --db_password="${DB_PASS}"     --admin_firstname="Admin"     --admin_lastname="User"     --admin_username="admin"     --admin_email="${ADMIN_EMAIL}"     --admin_password="${ADMIN_PASS}"     --force
+fi
+
+echo "STEP 6/7: post-install config"
+php -r '
+$file = $argv[1];
+$siteUrl = $argv[2];
+$fromName = $argv[3];
+$fromEmail = $argv[4];
+$mailerDsn = $argv[5];
+$config = include $file;
+if (!is_array($config)) {
+    fwrite(STDERR, "Unexpected config format
+");
+    exit(1);
+}
+$config["site_url"] = $siteUrl;
+$config["mailer_from_name"] = $fromName;
+$config["mailer_from_email"] = $fromEmail;
+$config["mailer_dsn"] = $mailerDsn;
+file_put_contents($file, "<?php
+return ".var_export($config, true).";
+");
+' "${CONFIG_FILE}" "${FINAL_URL}" "${MAILER_FROM_NAME}" "${ADMIN_EMAIL}" "smtp://127.0.0.1:25"
+
+chown ${MAUTIC_USER}:${MAUTIC_USER} "${CONFIG_FILE}"
+
+cat > /etc/cron.d/mautic <<EOF
+*/15 * * * * ${MAUTIC_USER} php ${MAUTIC_DIR}/bin/console mautic:segments:update --batch-limit=300 > /dev/null 2>&1
+5-59/15 * * * * ${MAUTIC_USER} php ${MAUTIC_DIR}/bin/console mautic:campaigns:update --batch-limit=300 > /dev/null 2>&1
+10-59/15 * * * * ${MAUTIC_USER} php ${MAUTIC_DIR}/bin/console mautic:campaigns:trigger --batch-limit=300 > /dev/null 2>&1
+*/5 * * * * ${MAUTIC_USER} php ${MAUTIC_DIR}/bin/console mautic:emails:send --message-limit=200 > /dev/null 2>&1
+EOF
+chmod 0644 /etc/cron.d/mautic
+
+echo "STEP 7/7: cache + credentials"
+sudo -u ${MAUTIC_USER} php "${MAUTIC_DIR}/bin/console" cache:clear || true
+sudo -u ${MAUTIC_USER} php "${MAUTIC_DIR}/bin/console" cache:warmup || true
+
+cat > "${ENV_FILE}" <<EOF
+DOMAIN="${DOMAIN}"
+ADMIN_EMAIL="${ADMIN_EMAIL}"
+TIMEZONE="${TIMEZONE}"
+LOCALE="${LOCALE}"
+MAILER_FROM_NAME="${MAILER_FROM_NAME}"
+DB_NAME="${DB_NAME}"
+DB_USER="${DB_USER}"
+DB_PASS="${DB_PASS}"
+ADMIN_PASS="${ADMIN_PASS}"
+EOF
+chmod 600 "${ENV_FILE}"
+
+cat > "${CREDS_FILE}" <<EOF
+URL=${FINAL_URL}
+ADMIN_EMAIL=${ADMIN_EMAIL}
+ADMIN_PASS=${ADMIN_PASS}
+DB_NAME=${DB_NAME}
+DB_USER=${DB_USER}
+DB_PASS=${DB_PASS}
+EOF
+chmod 600 "${CREDS_FILE}"
+
+touch "${SUCCESS_MARKER}"
+
+echo
+echo "=== MAUTIC INSTALL COMPLETE ==="
+echo "URL: ${FINAL_URL}"
+echo "Admin: ${ADMIN_EMAIL}"
+echo "Password: ${ADMIN_PASS}"
