@@ -79,7 +79,8 @@ mysql -u "${DB_USER}" -p"${DB_PASS}" -h 127.0.0.1 -D "${DB_NAME}" -e "SELECT 1;"
 echo "STEP 2/7: mautic source install"
 if [ ! -f "${MAUTIC_DIR}/composer.json" ]; then
   rm -rf "${MAUTIC_DIR}"
-  composer create-project mautic/recommended-project "${MAUTIC_DIR}" "${MAUTIC_VERSION}"     --no-interaction --prefer-dist --no-progress
+  composer create-project mautic/recommended-project "${MAUTIC_DIR}" "${MAUTIC_VERSION}" \
+    --no-interaction --prefer-dist --no-progress
 fi
 
 chown -R ${MAUTIC_USER}:${MAUTIC_USER} "${MAUTIC_DIR}"
@@ -135,30 +136,23 @@ fi
 echo "STEP 5/7: mautic cli install"
 CONFIG_FILE="${MAUTIC_DIR}/config/local.php"
 if [ ! -f "${CONFIG_FILE}" ]; then
-  sudo -u ${MAUTIC_USER} php "${MAUTIC_DIR}/bin/console" mautic:install "${FINAL_URL}"     --db_driver=pdo_mysql     --db_host=127.0.0.1     --db_port=3306     --db_name="${DB_NAME}"     --db_user="${DB_USER}"     --db_password="${DB_PASS}"     --admin_firstname="Admin"     --admin_lastname="User"     --admin_username="admin"     --admin_email="${ADMIN_EMAIL}"     --admin_password="${ADMIN_PASS}"     --force
+  sudo -u ${MAUTIC_USER} php "${MAUTIC_DIR}/bin/console" mautic:install "${FINAL_URL}" \
+    --db_driver=pdo_mysql \
+    --db_host=127.0.0.1 \
+    --db_port=3306 \
+    --db_name="${DB_NAME}" \
+    --db_user="${DB_USER}" \
+    --db_password="${DB_PASS}" \
+    --admin_firstname="Admin" \
+    --admin_lastname="User" \
+    --admin_username="admin" \
+    --admin_email="${ADMIN_EMAIL}" \
+    --admin_password="${ADMIN_PASS}" \
+    --force
 fi
 
 echo "STEP 6/7: post-install config"
-php -r '
-$file = $argv[1];
-$siteUrl = $argv[2];
-$fromName = $argv[3];
-$fromEmail = $argv[4];
-$mailerDsn = $argv[5];
-$config = include $file;
-if (!is_array($config)) {
-    fwrite(STDERR, "Unexpected config format
-");
-    exit(1);
-}
-$config["site_url"] = $siteUrl;
-$config["mailer_from_name"] = $fromName;
-$config["mailer_from_email"] = $fromEmail;
-$config["mailer_dsn"] = $mailerDsn;
-file_put_contents($file, "<?php
-return ".var_export($config, true).";
-");
-' "${CONFIG_FILE}" "${FINAL_URL}" "${MAILER_FROM_NAME}" "${ADMIN_EMAIL}" "smtp://127.0.0.1:25"
+php -r '\n$file = $argv[1];\n$siteUrl = $argv[2];\n$fromName = $argv[3];\n$fromEmail = $argv[4];\n$mailerDsn = $argv[5];\n$config = include $file;\nif (!is_array($config)) {\n    fwrite(STDERR, "Unexpected config format\\n");\n    exit(1);\n}\n$config["site_url"] = $siteUrl;\n$config["mailer_from_name"] = $fromName;\n$config["mailer_from_email"] = $fromEmail;\n$config["mailer_dsn"] = $mailerDsn;\nfile_put_contents($file, "<?php\\nreturn ".var_export($config, true).";\\n");\n' "${CONFIG_FILE}" "${FINAL_URL}" "${MAILER_FROM_NAME}" "${ADMIN_EMAIL}" "smtp://127.0.0.1:25"
 
 chown ${MAUTIC_USER}:${MAUTIC_USER} "${CONFIG_FILE}"
 
