@@ -152,7 +152,23 @@ if [ ! -f "${CONFIG_FILE}" ]; then
 fi
 
 echo "STEP 6/7: post-install config"
-php -r '\n$file = $argv[1];\n$siteUrl = $argv[2];\n$fromName = $argv[3];\n$fromEmail = $argv[4];\n$mailerDsn = $argv[5];\n$config = include $file;\nif (!is_array($config)) {\n    fwrite(STDERR, "Unexpected config format\\n");\n    exit(1);\n}\n$config["site_url"] = $siteUrl;\n$config["mailer_from_name"] = $fromName;\n$config["mailer_from_email"] = $fromEmail;\n$config["mailer_dsn"] = $mailerDsn;\nfile_put_contents($file, "<?php\\nreturn ".var_export($config, true).";\\n");\n' "${CONFIG_FILE}" "${FINAL_URL}" "${MAILER_FROM_NAME}" "${ADMIN_EMAIL}" "smtp://127.0.0.1:25"
+php -r '
+$file = $argv[1];
+$siteUrl = $argv[2];
+$fromName = $argv[3];
+$fromEmail = $argv[4];
+$mailerDsn = $argv[5];
+$config = include $file;
+if (!is_array($config)) {
+    fwrite(STDERR, "Unexpected config format\n");
+    exit(1);
+}
+$config["site_url"] = $siteUrl;
+$config["mailer_from_name"] = $fromName;
+$config["mailer_from_email"] = $fromEmail;
+$config["mailer_dsn"] = $mailerDsn;
+file_put_contents($file, "<?php\nreturn ".var_export($config, true).";\n");
+' "${CONFIG_FILE}" "${FINAL_URL}" "${MAILER_FROM_NAME}" "${ADMIN_EMAIL}" "smtp://127.0.0.1:25"
 
 chown ${MAUTIC_USER}:${MAUTIC_USER} "${CONFIG_FILE}"
 
